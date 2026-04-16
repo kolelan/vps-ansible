@@ -1,0 +1,72 @@
+---
+# Сбор статистики по диску на VPS (поиск причин заполнения ~7.7 ГБ)
+# Предпочтительно без Ansible: python3 scripts/disk_audit.py (см. Readme-vps.md)
+# Либо из каталога ansible-php-project:
+#   ansible-playbook playbooks/disk_audit.yml
+- name: Аудит использования диска на VPS
+  hosts: vps
+  connection: paramiko
+  gather_facts: true
+  vars:
+    audit_log_path: "/tmp/ansible-disk-audit-{{ ansible_date_time.epoch }}.txt"
+  tasks:
+    - name: Сводка df -h
+      ansible.builtin.command: df -hT
+      register: df_out
+      changed_when: false
+
+    - name: Топ каталогов в /
+      ansible.builtin.shell: du -xh --max-depth=1 / 2>/dev/null | sort -h
+      register: du_root
+      changed_when: false
+
+    - name: Размер /var/log (если есть)
+      ansible.builtin.shell: du -sh /var/log 2>/dev/null || echo "нет /var/log"
+      register: du_var_log
+      changed_when: false
+
+    - name: Крупные элементы в /var/log
+      ansible.builtin.shell: du -sh /var/log/* 2>/dev/null | sort -h | tail -n 30
+      register: du_var_log_items
+      changed_when: false
+
+    - name: Journald — занято на диске
+      ansible.builtin.command: journalctl --disk-usage
+      register: journal_disk
+      changed_when: false
+      failed_when: false
+
+    - name: WireGuard — типичные пути
+      ansible.builtin.shell: |
+        for p in /etc/wireguard /var/log/wireguard /opt/outline; do
+          if [ -e "$p" ]; then du -sh "$p" 2>/dev/null; else echo "$p — нет"; fi
+        done
+      register: du_vpn_paths
+      changed_when: false
+
+    - name: Собрать отчёт в один файл на сервере
+      ansible.builtin.copy:
+        dest: "{{ audit_log_path }}"
+        mode: "0644"
+        content: |
+          === df -hT ===
+          {{ df_out.stdout }}
+
+          === du --max-depth=1 / ===
+          {{ du_root.stdout }}
+
+          === /var/log ===
+          {{ du_var_log.stdout }}
+
+          === топ в /var/log ===
+          {{ du_var_log_items.stdout }}
+
+          === journalctl --disk-usage ===
+          {{ journal_disk.stdout | default('(команда недоступна или ошибка)') }}
+
+          === VPN / Outline пути ===
+          {{ du_vpn_paths.stdout }}
+
+    - name: Показать путь к отчёту
+      ansible.builtin.debug:
+        msg: "Отчёт на сервере: {{ audit_log_path }} — скопируйте: scp root@{{ inventory_hostname }}:{{ audit_log_path }} ."

@@ -1,0 +1,20 @@
+<?php
+declare(strict_types=1);
+header('Content-Type: text/html; charset=utf-8');
+$site = base64_decode('{{ site_label | b64encode }}', true) ?: '';
+?>
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title><?= htmlspecialchars($site, ENT_QUOTES | ENT_HTML5, 'UTF-8') ?></title>
+  <style>body{font-family:system-ui,sans-serif;margin:2rem;line-height:1.5;}code{background:#f0f0f0;padding:0.2em 0.4em;}</style>
+</head>
+<body>
+  <h1><?= htmlspecialchars($site, ENT_QUOTES | ENT_HTML5, 'UTF-8') ?></h1>
+  <p>Заглушка PHP. Корень: <code>/var/www/<?= htmlspecialchars($site, ENT_QUOTES | ENT_HTML5, 'UTF-8') ?>/web</code></p>
+  <p>Версия PHP: <strong><?= htmlspecialchars(PHP_VERSION, ENT_QUOTES | ENT_HTML5, 'UTF-8') ?></strong></p>
+  <p>Имя хоста запроса: <code><?= htmlspecialchars($_SERVER['HTTP_HOST'] ?? '', ENT_QUOTES | ENT_HTML5, 'UTF-8') ?></code></p>
+</body>
+</html>

@@ -1,0 +1,179 @@
+---
+- name: Проверка семейства ОС
+  ansible.builtin.assert:
+    that:
+      - ansible_os_family == "Debian"
+    fail_msg: "Роль рассчитана на Debian/Ubuntu."
+
+- name: Установить список пакетов PHP
+  ansible.builtin.set_fact:
+    _php_packages: >-
+      {{
+        (
+          ['php' ~ php_version ~ '-fpm', 'php' ~ php_version ~ '-cli', 'php' ~ php_version ~ '-mysql']
+          + (php_extensions | map('regex_replace', '^', 'php' ~ php_version ~ '-') | list)
+        ) | unique
+      }}
+
+- name: Пакеты для PPA (Ubuntu)
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+      - software-properties-common
+      - apt-transport-https
+    state: present
+    update_cache: true
+    lock_timeout: 300
+  when:
+    - php_use_ondrej_ppa | bool
+    - ansible_distribution == "Ubuntu"
+
+- name: Репозиторий ondrej/php (Ubuntu)
+  ansible.builtin.apt_repository:
+    repo: ppa:ondrej/php
+    state: present
+    update_cache: true
+  when:
+    - php_use_ondrej_ppa | bool
+    - ansible_distribution == "Ubuntu"
+
+- name: Обновить кеш apt
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+    lock_timeout: 300
+
+- name: Установить nginx
+  ansible.builtin.apt:
+    name: nginx
+    state: present
+    lock_timeout: 300
+
+- name: Дождаться освобождения блокировки apt/dpkg
+  ansible.builtin.shell: >-
+    set -euo pipefail;
+    timeout 600 bash -lc
+    'while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1 || fuser /var/cache/apt/archives/lock >/dev/null 2>&1; do sleep 5; done'
+  args:
+    executable: /bin/bash
+  changed_when: false
+
+- name: Установить MySQL сервер
+  ansible.builtin.apt:
+    name: default-mysql-server
+    state: present
+    dpkg_options: "force-confdef,force-confold"
+    lock_timeout: 300
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+
+- name: Установить PHP-FPM и расширения
+  ansible.builtin.apt:
+    name: "{{ _php_packages }}"
+    state: present
+    lock_timeout: 300
+  notify: Restart php-fpm
+
+- name: Включить и запустить php-fpm
+  ansible.builtin.service:
+    name: "php{{ php_version }}-fpm"
+    state: started
+    enabled: true
+
+- name: Обязательные параметры php.ini (CLI и FPM)
+  ansible.builtin.ini_file:
+    path: "/etc/php/{{ php_version }}/{{ item.sapi }}/php.ini"
+    section: "PHP"
+    option: "{{ item.option }}"
+    value: "{{ item.value }}"
+    mode: "0644"
+  loop:
+    - { sapi: "fpm", option: "memory_limit", value: "256M" }
+    - { sapi: "cli", option: "memory_limit", value: "256M" }
+    - { sapi: "fpm", option: "default_charset", value: "UTF-8" }
+    - { sapi: "cli", option: "default_charset", value: "UTF-8" }
+  notify: Restart php-fpm
+
+- name: mbstring.func_overload для совместимости со старыми PHP
+  ansible.builtin.ini_file:
+    path: "/etc/php/{{ php_version }}/{{ item }}/php.ini"
+    section: "mbstring"
+    option: "mbstring.func_overload"
+    value: "0"
+    mode: "0644"
+  loop:
+    - fpm
+    - cli
+  when: php_version is version('8.0', '<')
+  notify: Restart php-fpm
+
+- name: Включить и запустить MySQL
+  ansible.builtin.service:
+    name: mysql
+    state: started
+    enabled: true
+
+- name: Каталоги сайтов /var/www/<домен>/web
+  ansible.builtin.file:
+    path: "/var/www/{{ item.web_root | default(item.name) }}/web"
+    state: directory
+    owner: www-data
+    group: www-data
+    mode: "0755"
+  loop: "{{ php_sites }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Заглушка index.php
+  ansible.builtin.template:
+    src: index.php.j2
+    dest: "/var/www/{{ item.web_root | default(item.name) }}/web/index.php"
+    owner: www-data
+    group: www-data
+    mode: "0644"
+  vars:
+    site_label: "{{ item.name }}"
+  loop: "{{ php_sites }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Конфиги nginx для сайтов
+  ansible.builtin.template:
+    src: nginx_site.conf.j2
+    dest: "/etc/nginx/sites-available/{{ item.name | regex_replace('[^a-zA-Z0-9._-]', '_') }}.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ php_sites }}"
+  loop_control:
+    label: "{{ item.name }}"
+  notify: Reload nginx
+
+- name: Включить сайты в sites-enabled
+  ansible.builtin.file:
+    src: "/etc/nginx/sites-available/{{ item.name | regex_replace('[^a-zA-Z0-9._-]', '_') }}.conf"
+    dest: "/etc/nginx/sites-enabled/{{ item.name | regex_replace('[^a-zA-Z0-9._-]', '_') }}.conf"
+    state: link
+    force: true
+  loop: "{{ php_sites }}"
+  loop_control:
+    label: "{{ item.name }}"
+  notify: Reload nginx
+
+- name: Отключить дефолтный сайт nginx
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+  when: nginx_remove_default_site | default(true) | bool
+  notify: Reload nginx
+
+- name: Проверить конфигурацию nginx
+  ansible.builtin.command: nginx -t
+  changed_when: false
+
+- name: Включить nginx
+  ansible.builtin.service:
+    name: nginx
+    state: started
+    enabled: true

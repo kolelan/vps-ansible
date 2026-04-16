@@ -1,0 +1,14 @@
+# Запуск: из каталога ansible-php-project
+#   docker compose build
+#   docker compose run --rm ansible-runner ansible --version
+#   docker compose run --rm -e VPS_SSH_PASSWORD ansible-runner ansible-playbook playbooks/ping.yml
+services:
+  ansible-runner:
+    build: .
+    image: ansible-php-project:local
+    working_dir: /project
+    volumes:
+      - .:/project
+    environment:
+      ANSIBLE_CONFIG: /project/ansible.cfg
+      VPS_SSH_PASSWORD: ${VPS_SSH_PASSWORD:-}

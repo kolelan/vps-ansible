@@ -1,0 +1,30 @@
+{# item: name, server_names (список имён для server_name), web_root (каталог под /var/www, по умолчанию = name) #}
+{% set root_name = item.web_root | default(item.name) %}
+{% set names = item.server_names | default([item.name]) %}
+{% set safe = item.name | regex_replace('[^a-zA-Z0-9._-]', '_') %}
+server {
+    listen 80;
+    listen [::]:80;
+    server_name{% for n in names %} {{ n }}{% endfor %};
+
+    root /var/www/{{ root_name }}/web;
+    index index.php index.html;
+
+    access_log /var/log/nginx/{{ safe }}-access.log;
+    error_log  /var/log/nginx/{{ safe }}-error.log;
+
+    location / {
+        try_files $uri $uri/ /index.php?$query_string;
+    }
+
+    location ~ \.php$ {
+        try_files $uri =404;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        fastcgi_pass unix:/run/php/php{{ php_version }}-fpm.sock;
+    }
+
+    location ~ /\.ht {
+        deny all;
+    }
+}

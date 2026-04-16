@@ -1,0 +1,10 @@
+---
+# Проверка SSH и Python на VPS
+# ansible-playbook playbooks/ping.yml
+- name: Проверка связи с VPS
+  hosts: vps
+  connection: paramiko
+  gather_facts: false
+  tasks:
+    - name: Ping
+      ansible.builtin.ping:

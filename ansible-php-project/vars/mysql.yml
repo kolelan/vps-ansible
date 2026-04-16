@@ -1,0 +1,17 @@
+---
+# Глобальные настройки MySQL для playbooks/deploy_mysql.yml
+# Пароли: vars/mysql_secrets.yml (scripts/generate_mysql_secrets.py). Сайты — vars/php_sites.yml (опционально mysql_id).
+
+mysql:
+  # В Ubuntu/Debian default-mysql-server обычно запускает MariaDB с сервисом mysql.
+  service_name: "mysql"
+  login_unix_socket: "/run/mysqld/mysqld.sock"
+
+mysql_packages:
+  - "default-mysql-server"
+  - "python3-pymysql"
+
+# Отдельный логин: полные права на все базы из php_sites (миграции, админка, бэкапы).
+# Пароль: mysql_all_db_user_password в vars/mysql_secrets.yml
+mysql_all_databases_user:
+  name: all_db_user

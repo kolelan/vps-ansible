@@ -1,0 +1,260 @@
+---
+# Установка и настройка PostgreSQL по vars/postgresql.yml и vars/php_sites.yml
+# Запуск: bash scripts/wsl-ansible.sh ansible-playbook playbooks/deploy_postgresql.yml
+
+- name: Установка и настройка PostgreSQL
+  hosts: vps
+  connection: paramiko
+  become: true
+  vars_files:
+    - ../vars/postgresql.yml
+    - ../vars/php_sites.yml
+  vars:
+    pgsql_php_sites: >-
+      {{
+        (php_sites | selectattr('db', 'undefined') | list)
+        + (php_sites | selectattr('db', 'in', ['pgsql', 'both']) | list)
+      }}
+
+  tasks:
+    - name: Проверить наличие vars/pgsql_secrets.yml на контроллере
+      ansible.builtin.stat:
+        path: "{{ playbook_dir }}/../vars/pgsql_secrets.yml"
+      delegate_to: localhost
+      become: false
+      vars:
+        ansible_connection: local
+      run_once: true
+      register: pgsql_secrets_stat
+
+    - name: Напоминание создать секреты PostgreSQL
+      ansible.builtin.fail:
+        msg: >-
+          Нет файла vars/pgsql_secrets.yml. Сгенерируйте пароли
+          (из каталога ansible-php-project): python3 scripts/generate_pgsql_secrets.py
+          (зависимость: pip install pyyaml). Файл в .gitignore, не коммитьте.
+      when: not pgsql_secrets_stat.stat.exists
+
+    - name: Загрузить секреты PostgreSQL
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../vars/pgsql_secrets.yml"
+      delegate_to: localhost
+      become: false
+      vars:
+        ansible_connection: local
+      run_once: true
+
+    - name: Проверить структуру pgsql_secrets.yml
+      ansible.builtin.assert:
+        that:
+          - pgsql_site_passwords is defined
+          - pgsql_site_passwords is mapping
+          - postgresql_all_db_user_password is defined
+          - postgresql_all_db_user_password | length > 0
+
+    - name: Проверить наличие пароля для каждого сайта в pgsql_secrets.yml
+      ansible.builtin.assert:
+        that:
+          - item.name in pgsql_site_passwords
+          - (pgsql_site_passwords[item.name] | default('') | length) > 0
+        fail_msg: >-
+          Для сайта «{{ item.name }}» нет ключа в pgsql_site_passwords — обновите vars/pgsql_secrets.yml
+          (python3 scripts/generate_pgsql_secrets.py).
+      loop: "{{ pgsql_php_sites }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Установить пакеты PostgreSQL
+      ansible.builtin.apt:
+        name: "{{ postgresql_packages }}"
+        state: present
+        update_cache: true
+
+    - name: Запустить и включить сервис PostgreSQL
+      ansible.builtin.service:
+        name: postgresql
+        state: started
+        enabled: true
+
+    - name: Определить каталог main кластера PostgreSQL
+      ansible.builtin.shell: set -o pipefail && ls -d /etc/postgresql/*/main 2>/dev/null | head -n1
+      args:
+        executable: /bin/bash
+      register: postgresql_main_dir
+      changed_when: false
+
+    - name: Убедиться что найден каталог конфигурации PostgreSQL
+      ansible.builtin.assert:
+        that:
+          - postgresql_main_dir.stdout | length > 0
+          - "'/etc/postgresql/' in postgresql_main_dir.stdout"
+        fail_msg: "Не найден каталог /etc/postgresql/*/main — проверьте установку пакета postgresql"
+
+    - name: Собрать параметры PostgreSQL по сайтам
+      ansible.builtin.set_fact:
+        postgresql_sites_db: "{{ postgresql_sites_db | default([]) + [_entry] }}"
+      loop: "{{ pgsql_php_sites }}"
+      loop_control:
+        label: "{{ item.name }}"
+      vars:
+        _slug: >-
+          {{
+            item.pgsql_id | default(
+              item.name | lower
+              | regex_replace('\\.', '_')
+              | regex_replace('[^a-z0-9_]', '_')
+              | regex_replace('_+', '_')
+              | regex_replace('^_+|_+$', '')
+            )
+          }}
+        _entry:
+          site: "{{ item.name }}"
+          slug: "{{ _slug }}"
+          password: "{{ pgsql_site_passwords[item.name] }}"
+      when: pgsql_php_sites | length > 0
+
+    - name: Проверить идентификаторы БД
+      ansible.builtin.assert:
+        that:
+          - item.slug | length > 0
+          - item.slug | length <= 63
+        fail_msg: >-
+          Сайт «{{ item.site }}»: задайте pgsql_id (латиница, цифры, _; не длиннее 63 символов),
+          если имя домена не даёт валидный идентификатор PostgreSQL.
+      loop: "{{ postgresql_sites_db | default([]) }}"
+      loop_control:
+        label: "{{ item.site }}"
+      no_log: true
+
+    - name: Настроить порт PostgreSQL
+      ansible.builtin.lineinfile:
+        path: "{{ postgresql_main_dir.stdout }}/postgresql.conf"
+        regexp: "^[#\\s]*port\\s*="
+        line: "port = {{ postgresql.port }}"
+      notify: restart postgresql
+
+    - name: Настроить listen_addresses PostgreSQL
+      ansible.builtin.lineinfile:
+        path: "{{ postgresql_main_dir.stdout }}/postgresql.conf"
+        regexp: "^[#\\s]*listen_addresses\\s*="
+        line: "listen_addresses = '{{ postgresql.listen_addresses }}'"
+      notify: restart postgresql
+
+    - name: Разрешить подключения к PostgreSQL из конфигурации
+      ansible.builtin.blockinfile:
+        path: "{{ postgresql_main_dir.stdout }}/pg_hba.conf"
+        marker: "# {mark} ANSIBLE MANAGED POSTGRESQL ACCESS"
+        block: |
+          {% for cidr in postgresql.allowed_networks %}
+          host    all             all             {{ cidr }}            {{ postgresql.auth_method }}
+          {% endfor %}
+      notify: restart postgresql
+
+    - name: Применить перезапуск PostgreSQL при изменениях
+      ansible.builtin.meta: flush_handlers
+
+    - name: Создать пользователей PostgreSQL для сайтов
+      become_user: postgres
+      community.postgresql.postgresql_user:
+        name: "{{ item.slug }}"
+        password: "{{ item.password }}"
+        role_attr_flags: LOGIN
+        state: present
+      loop: "{{ postgresql_sites_db | default([]) }}"
+      loop_control:
+        label: "{{ item.site }} → {{ item.slug }}"
+
+    - name: Создать базы данных PostgreSQL для сайтов
+      become_user: postgres
+      community.postgresql.postgresql_db:
+        name: "{{ item.slug }}"
+        owner: "{{ item.slug }}"
+        encoding: "{{ postgresql_site_db_defaults.encoding }}"
+        lc_collate: "{{ postgresql_site_db_defaults.lc_collate }}"
+        lc_ctype: "{{ postgresql_site_db_defaults.lc_ctype }}"
+        template: "{{ postgresql_site_db_defaults.template }}"
+        state: present
+      loop: "{{ postgresql_sites_db | default([]) }}"
+      loop_control:
+        label: "{{ item.site }} → {{ item.slug }}"
+
+    - name: Убрать права у PUBLIC на базах сайтов
+      become_user: postgres
+      community.postgresql.postgresql_privs:
+        db: "{{ item.slug }}"
+        role: PUBLIC
+        type: database
+        objs: "{{ item.slug }}"
+        privs: ALL
+        state: absent
+      loop: "{{ postgresql_sites_db | default([]) }}"
+      loop_control:
+        label: "{{ item.slug }}"
+
+    - name: Создать пользователя со доступом ко всем базам сайтов
+      become_user: postgres
+      community.postgresql.postgresql_user:
+        name: "{{ postgresql_all_databases_user.name }}"
+        password: "{{ postgresql_all_db_user_password }}"
+        role_attr_flags: LOGIN
+        state: present
+
+    - name: Выдать доступ к базам сайтов пользователю all_db (уровень database)
+      become_user: postgres
+      community.postgresql.postgresql_privs:
+        db: "{{ item.slug }}"
+        role: "{{ postgresql_all_databases_user.name }}"
+        type: database
+        objs: "{{ item.slug }}"
+        privs: ALL
+        state: present
+      loop: "{{ postgresql_sites_db | default([]) }}"
+      loop_control:
+        label: "{{ item.slug }}"
+
+    - name: Выдать права на схему public пользователю all_db
+      become_user: postgres
+      community.postgresql.postgresql_privs:
+        db: "{{ item.slug }}"
+        role: "{{ postgresql_all_databases_user.name }}"
+        type: schema
+        objs: public
+        privs: ALL
+        state: present
+      loop: "{{ postgresql_sites_db | default([]) }}"
+      loop_control:
+        label: "{{ item.slug }}"
+
+    - name: Выдать права на таблицы в public пользователю all_db
+      become_user: postgres
+      community.postgresql.postgresql_privs:
+        db: "{{ item.slug }}"
+        role: "{{ postgresql_all_databases_user.name }}"
+        type: table
+        schema: public
+        objs: ALL_IN_SCHEMA
+        privs: ALL
+        state: present
+      loop: "{{ postgresql_sites_db | default([]) }}"
+      loop_control:
+        label: "{{ item.slug }}"
+
+    - name: Выдать права на последовательности в public пользователю all_db
+      become_user: postgres
+      community.postgresql.postgresql_privs:
+        db: "{{ item.slug }}"
+        role: "{{ postgresql_all_databases_user.name }}"
+        type: sequence
+        schema: public
+        objs: ALL_IN_SCHEMA
+        privs: ALL
+        state: present
+      loop: "{{ postgresql_sites_db | default([]) }}"
+      loop_control:
+        label: "{{ item.slug }}"
+
+  handlers:
+    - name: restart postgresql
+      ansible.builtin.service:
+        name: postgresql
+        state: restarted

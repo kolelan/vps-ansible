@@ -1,0 +1,20 @@
+---
+# Настройки Redis для playbooks/deploy_redis.yml
+# По умолчанию Redis и конфиг ставятся на хост для всех сайтов (WAF, счётчики и т.д.).
+# Отключить: redis_install_for_all_sites: false и задайте use_redis: true нужным сайтам в php_sites.
+
+# Установить redis-server и правки redis.conf всегда (true), либо только если у сайта use_redis: true (false)
+redis_install_for_all_sites: true
+
+redis:
+  # Только локальный доступ (приложение на том же хосте).
+  bind: "127.0.0.1 -::1"
+  port: 6379
+  # Раскомментируйте и задайте пароль, если нужен requirepass для всех клиентов:
+  # requirepass: "change_me_redis_requirepass"
+
+redis_packages:
+  - redis-server
+
+# Расширение PHP: пакет php{{ php_version }}-redis — в списке php_extensions в vars/php_sites.yml (роль php_nginx_sites).
+redis_install_php_extension: false

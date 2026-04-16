@@ -1,0 +1,13 @@
+---
+# Установка nginx + php-fpm и виртуальных хостов по списку vars/php_sites.yml
+# Запуск: bash scripts/wsl-ansible.sh ansible-playbook playbooks/deploy_php_sites.yml
+#
+# Добавляйте домены в vars/php_sites.yml → php_sites. Версию PHP — php_version.
+- name: Развёртывание PHP-сайтов (nginx + php-fpm)
+  hosts: vps
+  connection: paramiko
+  become: true
+  vars_files:
+    - ../vars/php_sites.yml
+  roles:
+    - php_nginx_sites

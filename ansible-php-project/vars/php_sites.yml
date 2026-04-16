@@ -1,0 +1,62 @@
+---
+# Сайты и PHP: подключайте в плейбук через vars_files или group_vars.
+# Добавляйте записи в php_sites; каталог будет /var/www/<name>/web/
+#
+# Пароли PostgreSQL/MySQL не хранятся здесь:
+# vars/pgsql_secrets.yml (scripts/generate_pgsql_secrets.py),
+# vars/mysql_secrets.yml (scripts/generate_mysql_secrets.py).
+# pgsql_id/mysql_id — необязательно; для доменов не из [a-z0-9.] задайте короткое имя (латиница, цифры, _).
+# db — какие БД создавать для сайта: mysql|pgsql|both|none. По умолчанию: both.
+#
+# Redis: по умолчанию сервер ставится на хост для всех сайтов (vars/redis.yml: redis_install_for_all_sites).
+# У сайта можно указать use_redis: true, если общая установка отключена; redis_db: 0..15 — логическая БД (справочно).
+
+# Версия PHP-FPM (на Ubuntu 22.04 без PPA доступна в основном 8.1; 8.3 — через ondrej).
+php_version: "8.3"
+
+# Для Ubuntu: PPA ondrej/php (нужен для 8.2+ на Jammy). На Debian — выключите и поставьте версию из репозитория дистрибутива.
+php_use_ondrej_ppa: true
+
+# Расширения: к имени будет добавлен префикс php{{ php_version }}-
+# json/pcre/hash/session/tokenizer, а также openssl и zlib в PHP 8+ идут в core/common
+# и отдельными пакетами обычно не ставятся.
+php_extensions:
+  - curl
+  - xml
+  - mbstring
+  - gd
+  - pdo
+  - pgsql
+  - sqlite3
+  - mysql
+  - zip
+  - redis
+
+# Убрать дефолтный сайт nginx (страница «Welcome to nginx»).
+nginx_remove_default_site: true
+
+php_sites:
+  - name: timitaro.ru
+    db: pgsql
+  - name: honorbelt.ru
+    db: pgsql
+  - name: klln.ru
+    db: pgsql
+  - name: ricrec.ru
+    db: mysql
+  # IDN: при проблемах с nginx добавьте punycode в server_names (см. шаблон).
+  - name: отруки.рф
+    db: pgsql
+    pgsql_id: otruki_rf
+  - name: deepark.ru
+    db: mysql
+  - name: mungobongo.ru
+    db: pgsql
+  - name: zebrabro.ru
+    db: pgsql
+  - name: formateo.ru
+    db: pgsql
+  - name: skyward-moto.ru
+    db: mysql
+  - name: skyward-moto.com
+    db: mysql

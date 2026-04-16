@@ -1,0 +1,185 @@
+---
+# Установка и настройка MySQL/MariaDB по vars/mysql.yml и vars/php_sites.yml
+# Запуск: bash scripts/wsl-ansible.sh ansible-playbook playbooks/deploy_mysql.yml
+
+- name: Установка и настройка MySQL/MariaDB
+  hosts: vps
+  connection: paramiko
+  become: true
+  vars_files:
+    - ../vars/mysql.yml
+    - ../vars/php_sites.yml
+  vars:
+    mysql_php_sites: >-
+      {{
+        (php_sites | selectattr('db', 'undefined') | list)
+        + (php_sites | selectattr('db', 'in', ['mysql', 'both']) | list)
+      }}
+
+  tasks:
+    - name: Проверить наличие vars/mysql_secrets.yml на контроллере
+      ansible.builtin.stat:
+        path: "{{ playbook_dir }}/../vars/mysql_secrets.yml"
+      delegate_to: localhost
+      become: false
+      vars:
+        ansible_connection: local
+      run_once: true
+      register: mysql_secrets_stat
+
+    - name: Напоминание создать секреты MySQL
+      ansible.builtin.fail:
+        msg: >-
+          Нет файла vars/mysql_secrets.yml. Сгенерируйте пароли
+          (из каталога ansible-php-project): python3 scripts/generate_mysql_secrets.py
+          (зависимость: pip install pyyaml). Файл в .gitignore, не коммитьте.
+      when: not mysql_secrets_stat.stat.exists
+
+    - name: Загрузить секреты MySQL
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../vars/mysql_secrets.yml"
+      delegate_to: localhost
+      become: false
+      vars:
+        ansible_connection: local
+      run_once: true
+
+    - name: Проверить структуру mysql_secrets.yml
+      ansible.builtin.assert:
+        that:
+          - mysql_site_passwords is defined
+          - mysql_site_passwords is mapping
+          - mysql_all_db_user_password is defined
+          - mysql_all_db_user_password | length > 0
+
+    - name: Проверить наличие пароля для каждого сайта в mysql_secrets.yml
+      ansible.builtin.assert:
+        that:
+          - item.name in mysql_site_passwords
+          - (mysql_site_passwords[item.name] | default('') | length) > 0
+        fail_msg: >-
+          Для сайта «{{ item.name }}» нет ключа в mysql_site_passwords — обновите vars/mysql_secrets.yml
+          (python3 scripts/generate_mysql_secrets.py).
+      loop: "{{ mysql_php_sites }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Дождаться освобождения блокировки apt/dpkg
+      ansible.builtin.shell: >-
+        set -euo pipefail;
+        timeout 600 bash -lc
+        'while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1 || fuser /var/cache/apt/archives/lock >/dev/null 2>&1; do sleep 5; done'
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Установить пакеты MySQL/MariaDB
+      ansible.builtin.apt:
+        name: "{{ mysql_packages }}"
+        state: present
+        update_cache: true
+        dpkg_options: "force-confdef,force-confold"
+        lock_timeout: 300
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+
+    - name: Запустить и включить сервис MySQL/MariaDB
+      ansible.builtin.service:
+        name: "{{ mysql.service_name }}"
+        state: started
+        enabled: true
+
+    - name: Собрать параметры MySQL по сайтам
+      ansible.builtin.set_fact:
+        mysql_sites_db: "{{ mysql_sites_db | default([]) + [_entry] }}"
+      loop: "{{ mysql_php_sites }}"
+      loop_control:
+        label: "{{ item.name }}"
+      vars:
+        _slug: >-
+          {{
+            item.mysql_id | default(
+              item.name | lower
+              | regex_replace('\\.', '_')
+              | regex_replace('[^a-z0-9_]', '_')
+              | regex_replace('_+', '_')
+              | regex_replace('^_+|_+$', '')
+            )
+          }}
+        _entry:
+          site: "{{ item.name }}"
+          slug: "{{ _slug }}"
+          password: "{{ mysql_site_passwords[item.name] }}"
+      when: mysql_php_sites | length > 0
+
+    - name: Проверить идентификаторы MySQL
+      ansible.builtin.assert:
+        that:
+          - item.slug | length > 0
+          - item.slug | length <= 32
+        fail_msg: >-
+          Сайт «{{ item.site }}»: задайте mysql_id (латиница, цифры, _; не длиннее 32 символов),
+          если имя домена не даёт валидный идентификатор MySQL.
+      loop: "{{ mysql_sites_db | default([]) }}"
+      loop_control:
+        label: "{{ item.site }}"
+      no_log: true
+
+    - name: Создать пользователей MySQL для сайтов
+      community.mysql.mysql_user:
+        name: "{{ item.slug }}"
+        host: "localhost"
+        password: "{{ item.password }}"
+        login_unix_socket: "{{ mysql.login_unix_socket }}"
+        check_implicit_admin: true
+        state: present
+      loop: "{{ mysql_sites_db | default([]) }}"
+      loop_control:
+        label: "{{ item.site }} -> {{ item.slug }}"
+      no_log: true
+
+    - name: Создать базы данных MySQL для сайтов
+      community.mysql.mysql_db:
+        name: "{{ item.slug }}"
+        login_unix_socket: "{{ mysql.login_unix_socket }}"
+        check_implicit_admin: true
+        state: present
+      loop: "{{ mysql_sites_db | default([]) }}"
+      loop_control:
+        label: "{{ item.site }} -> {{ item.slug }}"
+
+    - name: Выдать доступ к своей БД пользователям сайтов
+      community.mysql.mysql_user:
+        name: "{{ item.slug }}"
+        host: "localhost"
+        priv: "{{ item.slug }}.*:ALL"
+        append_privs: true
+        login_unix_socket: "{{ mysql.login_unix_socket }}"
+        check_implicit_admin: true
+        state: present
+      loop: "{{ mysql_sites_db | default([]) }}"
+      loop_control:
+        label: "{{ item.site }} -> {{ item.slug }}"
+
+    - name: Создать пользователя с доступом ко всем базам сайтов
+      community.mysql.mysql_user:
+        name: "{{ mysql_all_databases_user.name }}"
+        host: "localhost"
+        password: "{{ mysql_all_db_user_password }}"
+        login_unix_socket: "{{ mysql.login_unix_socket }}"
+        check_implicit_admin: true
+        state: present
+      no_log: true
+
+    - name: Выдать доступ к базам сайтов пользователю all_db
+      community.mysql.mysql_user:
+        name: "{{ mysql_all_databases_user.name }}"
+        host: "localhost"
+        priv: "{{ item.slug }}.*:ALL"
+        append_privs: true
+        login_unix_socket: "{{ mysql.login_unix_socket }}"
+        check_implicit_admin: true
+        state: present
+      loop: "{{ mysql_sites_db | default([]) }}"
+      loop_control:
+        label: "{{ item.slug }}"

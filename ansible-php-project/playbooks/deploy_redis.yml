@@ -1,0 +1,108 @@
+---
+# Установка Redis на хост: по умолчанию для всех сайтов (vars/redis.yml — redis_install_for_all_sites).
+# Иначе только если у сайта use_redis: true в vars/php_sites.yml.
+# Запуск: bash scripts/wsl-ansible.sh ansible-playbook playbooks/deploy_redis.yml
+#
+# Расширение PHP: пакет php{{ php_version }}-redis — в php_extensions (redis) в php_sites.yml, ставит deploy_php_sites.yml.
+# Логическое разделение данных между приложениями — redis_db 0–15 у сайта (справочно) или префиксы ключей.
+
+- name: Установка Redis для сайтов
+  hosts: vps
+  connection: paramiko
+  become: true
+  vars_files:
+    - ../vars/php_sites.yml
+    - ../vars/redis.yml
+
+  tasks:
+    - name: Определить сайты с явным use_redis
+      ansible.builtin.set_fact:
+        sites_redis: "{{ php_sites | selectattr('use_redis', 'defined') | selectattr('use_redis', 'equalto', true) | list }}"
+
+    - name: Нужна ли установка Redis на этом прогоне
+      ansible.builtin.set_fact:
+        redis_install_needed: "{{ (redis_install_for_all_sites | default(true) | bool) or (sites_redis | length > 0) }}"
+
+    - name: Сообщение если установка Redis отключена
+      ansible.builtin.debug:
+        msg: >-
+          Установка пропущена: redis_install_for_all_sites=false и нет сайтов с use_redis: true.
+      when: not (redis_install_needed | bool)
+
+    - name: Установить Redis
+      ansible.builtin.apt:
+        name: "{{ redis_packages }}"
+        state: present
+        update_cache: true
+      when: redis_install_needed | bool
+      notify: restart redis
+
+    - name: Привязать Redis к интерфейсу (bind)
+      ansible.builtin.lineinfile:
+        path: /etc/redis/redis.conf
+        regexp: '^(#\s*)?bind\s+'
+        line: "bind {{ redis.bind }}"
+        create: false
+      when: redis_install_needed | bool
+      notify: restart redis
+
+    - name: Включить protected-mode
+      ansible.builtin.lineinfile:
+        path: /etc/redis/redis.conf
+        regexp: '^(#\s*)?protected-mode\s+'
+        line: "protected-mode yes"
+      when: redis_install_needed | bool
+      notify: restart redis
+
+    - name: Порт Redis
+      ansible.builtin.lineinfile:
+        path: /etc/redis/redis.conf
+        regexp: '^(#\s*)?port\s+'
+        line: "port {{ redis.port | default(6379) }}"
+      when: redis_install_needed | bool
+      notify: restart redis
+
+    - name: Задать requirepass
+      ansible.builtin.lineinfile:
+        path: /etc/redis/redis.conf
+        regexp: '^(#\s*)?requirepass\s+'
+        line: "requirepass {{ redis.requirepass }}"
+      when:
+        - redis_install_needed | bool
+        - redis.requirepass is defined
+        - redis.requirepass | length > 0
+      notify: restart redis
+
+    - name: Включить и запустить Redis
+      ansible.builtin.service:
+        name: redis-server
+        state: started
+        enabled: true
+      when: redis_install_needed | bool
+
+    - name: Установить расширение PHP для Redis (если включено в vars/redis.yml)
+      ansible.builtin.apt:
+        name: "php{{ php_version }}-redis"
+        state: present
+      when:
+        - redis_install_needed | bool
+        - redis_install_php_extension | default(false) | bool
+      notify: restart php-fpm
+
+    - name: Режим установки Redis и сайты с use_redis (справочно)
+      ansible.builtin.debug:
+        msg:
+          redis_install_for_all_sites: "{{ redis_install_for_all_sites | default(true) }}"
+          sites_with_use_redis: "{{ sites_redis | map(attribute='name') | list }}"
+      when: redis_install_needed | bool
+
+  handlers:
+    - name: restart redis
+      ansible.builtin.service:
+        name: redis-server
+        state: restarted
+
+    - name: restart php-fpm
+      ansible.builtin.service:
+        name: "php{{ php_version }}-fpm"
+        state: restarted

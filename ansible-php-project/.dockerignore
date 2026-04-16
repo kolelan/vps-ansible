@@ -1,0 +1,8 @@
+venv/
+venv-wsl/
+.venv/
+.git/
+__pycache__/
+*.pyc
+*.retry
+.env
