@@ -1,0 +1,11 @@
+venv/
+venv-wsl/
+.venv/
+.env
+inventory/hosts.ini
+group_vars/vps.yml
+vars/pgsql_secrets.yml
+vars/mysql_secrets.yml
+*.retry
+__pycache__/
+*.pyc
